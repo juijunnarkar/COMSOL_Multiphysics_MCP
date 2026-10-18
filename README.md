@@ -5,6 +5,7 @@
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
 ![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19503007.svg)](https://doi.org/10.5281/zenodo.19503007)
+[![tests](https://github.com/juijunnarkar/COMSOL_Multiphysics_MCP/actions/workflows/tests.yml/badge.svg)](https://github.com/juijunnarkar/COMSOL_Multiphysics_MCP/actions/workflows/tests.yml)
 
 ## What This Is
 
@@ -68,23 +69,37 @@ ARES-Sim BO  ──>  comsol_bridge  ──>  MPh layer (same connection)
 
 ## Tool Reference
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `mesh_reactor_2d` | Build 2D axisymmetric mesh with physics-aware sizing | `model_tag`, `refinement_level` |
-| `mesh_reactor_3d` | Build 3D tetrahedral mesh with injector refinement | `model_tag`, `bore_hmax`, `reactor_hmax` |
-| `mesh_quality_report` | Report element count, quality stats, type breakdown | `model_tag` |
-| `mesh_refine_local` | Refine mesh in specific domains or boundaries | `model_tag`, `domain_ids`, `hmax` |
-| `mesh_boundary_layer` | Add boundary layer mesh on selected boundaries | `model_tag`, `boundary_ids`, `num_layers` |
-| `solver_segregated_reactor` | Configure segregated solver with physics grouping | `model_tag`, `physics_list` |
-| `solver_fully_coupled` | Configure fully coupled solver | `model_tag`, `damping` |
-| `solver_parametric_sweep` | Set up parameter sweep study | `model_tag`, `param_name`, `values` |
-| `solver_convergence_monitor` | Monitor solver convergence in real time | `model_tag` |
-| `solver_diagnostics` | Diagnose solver failures and suggest fixes | `model_tag` |
-| `apply_analytic_properties` | Apply analytic gas property expressions | `model_tag`, `composition` |
-| `memorize_workflow` | Capture model structure as Digital Twin JSON | `model_tag` |
-| `convert_2d_to_3d` | Convert 2D axisymmetric recipe to 3D model | `recipe_file` |
-| `validate_model` | Check model for selection, material, mesh errors | `model_tag` |
-| `autofix_model` | Auto-repair detected validation errors | `model_tag`, `report` |
+The server registers 89 MCP tools. `tests/test_readme_tools.py` checks
+that this table lists every registered tool and no other tool. Each tool's
+docstring gives its parameters.
+
+| Group | Tools |
+|-------|-------|
+| Session | `comsol_start`, `comsol_connect`, `comsol_disconnect`, `comsol_status` |
+| Model | `model_introspect`, `model_load`, `model_create`, `model_create_component`, `model_list_components`, `model_save`, `model_save_version`, `model_list`, `model_set_current`, `model_clone`, `model_remove`, `model_inspect` |
+| Parameters | `param_get`, `param_set`, `param_list`, `param_sweep_setup`, `param_description` |
+| Geometry | `geometry_list`, `geometry_create`, `geometry_add_feature`, `geometry_add_block`, `geometry_add_cylinder`, `geometry_add_sphere`, `geometry_add_rectangle`, `geometry_add_circle`, `geometry_boolean_union`, `geometry_boolean_difference`, `geometry_import`, `geometry_build`, `geometry_list_features`, `geometry_get_boundaries` |
+| Physics and materials | `physics_list`, `physics_get_available`, `physics_add`, `physics_add_electrostatics`, `physics_add_solid_mechanics`, `physics_add_heat_transfer`, `physics_add_laminar_flow`, `physics_configure_boundary`, `physics_set_material`, `multiphysics_add`, `physics_list_features`, `physics_remove`, `physics_interactive_setup_flow`, `physics_setup_flow_boundaries`, `physics_interactive_setup_heat`, `physics_setup_heat_boundaries`, `physics_boundary_selection` |
+| Mesh | `mesh_list`, `mesh_create`, `mesh_info`, `mesh_quality_report`, `mesh_refine_local`, `mesh_boundary_layer` |
+| Reactor mesh (FCCVD defaults) | `mesh_reactor_2d`, `mesh_reactor_3d` |
+| Study | `study_list`, `study_solve`, `study_solve_async`, `study_get_progress`, `study_cancel`, `study_wait`, `solutions_list`, `datasets_list` |
+| Solver setup | `solver_segregated_reactor`, `solver_fully_coupled`, `solver_parametric_sweep`, `solver_convergence_monitor`, `solver_diagnostics` |
+| Results | `results_evaluate`, `results_global_evaluate`, `results_inner_values`, `results_outer_values`, `results_export_data`, `results_export_image`, `results_exports_list`, `results_plots_list` |
+| Documentation | `docs_get`, `docs_list`, `physics_get_guide`, `troubleshoot`, `modeling_best_practices`, `pdf_search`, `pdf_search_status`, `pdf_list_modules` |
+
+### Workflow scripts (not MCP tools yet)
+
+These scripts run from Python against an open model. An MCP client cannot
+call them yet.
+
+| Script | What it does |
+|--------|--------------|
+| `workflows/comsol_validator.py` | Checks a model for empty selections, material assignment, mesh, and multiphysics errors |
+| `workflows/comsol_autofixer.py` | Repairs the errors that the validator finds |
+| `workflows/memorize_workflows.py` | Captures the model structure as a Digital Twin JSON recipe |
+| `workflows/convert_2D_to_3D.py` | Converts a 2D axisymmetric recipe to a 3D model |
+| `workflows/Comsol_live_monitor.py` | Reports live model state: solver status, errors, warnings, physics, materials, and mesh quality |
+| `analytic_properties/apply_analytic_properties.py` | Applies the analytic gas property expressions |
 
 ## Installation
 

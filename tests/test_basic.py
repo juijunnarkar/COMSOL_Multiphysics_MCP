@@ -21,11 +21,12 @@ class TestVersioning:
         assert result.startswith("model_")
         assert result.endswith(".mph")
     
-    def test_generate_version_path(self):
-        from src.utils.versioning import generate_version_path
+    def test_generate_version_path(self, tmp_path, monkeypatch):
+        from src.utils import versioning
         
-        result = generate_version_path("/path/to/model.mph")
-        assert "/path/to/model_" in result
+        monkeypatch.setattr(versioning, "MODELS_BASE_DIR", tmp_path)
+        result = versioning.generate_version_path("/path/to/model.mph")
+        assert result.startswith(str(tmp_path / "model" / "model_"))
         assert result.endswith(".mph")
     
     def test_parse_version_info_valid(self):

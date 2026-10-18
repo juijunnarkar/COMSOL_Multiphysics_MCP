@@ -50,6 +50,108 @@ PHYSICS_INTERFACES = {
 }
 
 
+def _selection_entities(sel, dims: Sequence[int]) -> list[int]:
+    """Read back the entities of a selection, trying each dimension in order."""
+    for dim in dims:
+        try:
+            ents = [int(i) for i in list(sel.entities(dim))]
+            if ents:
+                return ents
+        except Exception:
+            continue
+    return []
+
+
+def assign_material(
+    model,
+    material_name: str,
+    domain_selection: Optional[Sequence[int]] = None,
+    physics_name: Optional[str] = None,
+) -> dict:
+    """
+    Set the domain selection of a component material and read it back.
+
+    The material is found by tag ("mat1") or label ("Aluminum"). Materials
+    belong to a component, not to a physics interface, so physics_name only
+    picks the component when more than one component has the material.
+    """
+    jm = model.java
+
+    if domain_selection is not None:
+        try:
+            domains = [int(d) for d in domain_selection]
+        except (TypeError, ValueError):
+            return {"success": False, "error": f"Domain numbers must be integers: {domain_selection}"}
+        if not domains or any(d < 1 for d in domains):
+            return {"success": False, "error": f"Domain numbers must be 1 or greater: {domain_selection}"}
+    else:
+        domains = None
+
+    components = list(jm.component())
+    if physics_name is not None:
+        components = [c for c in components if physics_name in [str(t) for t in c.physics().tags()]]
+        if not components:
+            return {"success": False, "error": f"Physics interface not found: {physics_name}"}
+
+    matches = []
+    available = []
+    for comp in components:
+        for tag in [str(t) for t in comp.material().tags()]:
+            label = str(comp.material(tag).label())
+            available.append(f"{label} ({tag}, {comp.tag()})")
+            if material_name in (tag, label):
+                matches.append((comp, tag, label))
+
+    if not matches:
+        return {
+            "success": False,
+            "error": f"Material not found in any component: {material_name}",
+            "available": available,
+            "hint": "A global material needs a Material Link in the component before it can be assigned.",
+        }
+    if len(matches) > 1:
+        return {
+            "success": False,
+            "error": f"Material '{material_name}' matches more than one node.",
+            "matches": [f"{label} ({tag}, {comp.tag()})" for comp, tag, label in matches],
+            "hint": "Pass the material tag, or pass physics_name to pick the component.",
+        }
+
+    comp, tag, label = matches[0]
+    sel = comp.material(tag).selection()
+    try:
+        if domains is None:
+            sel.all()
+        else:
+            sel.set(domains)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to set the selection of {tag}: {e}"}
+
+    # Read the selection back so the result reports what COMSOL holds, not what was asked.
+    dims = []
+    try:
+        geom_tags = [str(t) for t in comp.geom().tags()]
+        if geom_tags:
+            dims.append(int(comp.geom(geom_tags[0]).getSDim()))
+    except Exception:
+        pass
+    dims += [d for d in (3, 2, 1) if d not in dims]
+    applied = _selection_entities(sel, dims)
+
+    missing = sorted(set(domains) - set(applied)) if domains is not None else []
+    result = {
+        "success": bool(applied) and not missing,
+        "material": {"tag": tag, "label": label, "component": str(comp.tag())},
+        "requested_domains": domains if domains is not None else "all",
+        "applied_domains": applied,
+    }
+    if not applied:
+        result["error"] = "The material selection is empty after assignment."
+    elif missing:
+        result["error"] = f"COMSOL did not apply domains {missing}. Check the domain numbers."
+    return result
+
+
 def register_physics_tools(mcp: FastMCP) -> None:
     """Register physics tools with the MCP server."""
     
@@ -410,22 +512,24 @@ def register_physics_tools(mcp: FastMCP) -> None:
     
     @mcp.tool()
     def physics_set_material(
-        physics_name: str,
         material_name: str,
         domain_selection: Optional[Sequence[int]] = None,
+        physics_name: Optional[str] = None,
         model_name: Optional[str] = None
     ) -> dict:
         """
-        Assign a material to physics domains.
-        
+        Assign a material to domains and report the domains COMSOL applied.
+
         Args:
-            physics_name: Name of the physics interface
-            material_name: Name of the material to assign
-            domain_selection: Domain numbers (default: all domains for this physics)
+            material_name: Material tag (e.g. "mat1") or label (e.g. "Aluminum")
+            domain_selection: Domain numbers (default: all domains)
+            physics_name: Physics tag (e.g. "ht"). Use it only to pick the
+                component when the material exists in more than one component.
             model_name: Model name (default: current model)
-        
+
         Returns:
-            Assignment confirmation
+            The material, the requested domains, and the applied domains.
+            success is False when any requested domain was not applied.
         """
         model = session_manager.get_model(model_name)
         if model is None:
@@ -433,21 +537,9 @@ def register_physics_tools(mcp: FastMCP) -> None:
                 "success": False,
                 "error": f"Model not found: {model_name or 'no current model'}"
             }
-        
+
         try:
-            materials = model.materials()
-            if material_name not in materials:
-                return {"success": False, "error": f"Material not found: {material_name}"}
-            
-            physics_interfaces = model.physics()
-            if physics_name not in physics_interfaces:
-                return {"success": False, "error": f"Physics interface not found: {physics_name}"}
-            
-            return {
-                "success": True,
-                "message": f"Material '{material_name}' should be configured to cover the required domains.",
-                "note": "Use COMSOL GUI or low-level API for detailed material assignment.",
-            }
+            return assign_material(model, material_name, domain_selection, physics_name)
         except Exception as e:
             return {"success": False, "error": f"Failed to set material: {str(e)}"}
     
