@@ -69,7 +69,7 @@ ARES-Sim BO  ──>  comsol_bridge  ──>  MPh layer (same connection)
 
 ## Tool Reference
 
-The server registers 89 MCP tools. `tests/test_readme_tools.py` checks
+The server registers 90 MCP tools. `tests/test_readme_tools.py` checks
 that this table lists every registered tool and no other tool. Each tool's
 docstring gives its parameters.
 
@@ -79,7 +79,7 @@ docstring gives its parameters.
 | Model | `model_introspect`, `model_load`, `model_create`, `model_create_component`, `model_list_components`, `model_save`, `model_save_version`, `model_list`, `model_set_current`, `model_clone`, `model_remove`, `model_inspect` |
 | Parameters | `param_get`, `param_set`, `param_list`, `param_sweep_setup`, `param_description` |
 | Geometry | `geometry_list`, `geometry_create`, `geometry_add_feature`, `geometry_add_block`, `geometry_add_cylinder`, `geometry_add_sphere`, `geometry_add_rectangle`, `geometry_add_circle`, `geometry_boolean_union`, `geometry_boolean_difference`, `geometry_import`, `geometry_build`, `geometry_list_features`, `geometry_get_boundaries` |
-| Physics and materials | `physics_list`, `physics_get_available`, `physics_add`, `physics_add_electrostatics`, `physics_add_solid_mechanics`, `physics_add_heat_transfer`, `physics_add_laminar_flow`, `physics_configure_boundary`, `physics_set_material`, `multiphysics_add`, `physics_list_features`, `physics_remove`, `physics_interactive_setup_flow`, `physics_setup_flow_boundaries`, `physics_interactive_setup_heat`, `physics_setup_heat_boundaries`, `physics_boundary_selection` |
+| Physics and materials | `physics_list`, `physics_get_available`, `physics_add`, `physics_add_electrostatics`, `physics_add_solid_mechanics`, `physics_add_heat_transfer`, `physics_add_laminar_flow`, `physics_configure_boundary`, `material_create`, `physics_set_material`, `multiphysics_add`, `physics_list_features`, `physics_remove`, `physics_interactive_setup_flow`, `physics_setup_flow_boundaries`, `physics_interactive_setup_heat`, `physics_setup_heat_boundaries`, `physics_boundary_selection` |
 | Mesh | `mesh_list`, `mesh_create`, `mesh_info`, `mesh_quality_report`, `mesh_refine_local`, `mesh_boundary_layer` |
 | Reactor mesh (FCCVD defaults) | `mesh_reactor_2d`, `mesh_reactor_3d` |
 | Study | `study_list`, `study_solve`, `study_solve_async`, `study_get_progress`, `study_cancel`, `study_wait`, `solutions_list`, `datasets_list` |
@@ -125,7 +125,8 @@ cp .env.example .env
 # Edit .env with your COMSOL path and port
 
 # 4. Start COMSOL mphserver (in a separate terminal)
-$COMSOL_BIN mphserver -port 2036 -login auto
+# -multi on keeps the server running after a client disconnects.
+$COMSOL_BIN mphserver -port 2036 -login auto -multi on
 
 # 5. Verify connection
 python -c "import mph; c=mph.Client(port=2036); print('Connected:', c.names())"
