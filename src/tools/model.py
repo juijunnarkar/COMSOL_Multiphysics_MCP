@@ -451,59 +451,61 @@ def register_model_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": f"Failed to inspect model: {str(e)}"}
 
-@mcp.tool()
-def model_introspect() -> dict:
-    """
-    Reads the currently active model directly from the COMSOL server memory and extracts 
-    the exact Geometry, Physics, Boundary Conditions, Studies, and Results tags.
-    Use this tool to 'learn' a user's manual GUI workflow so it can be replicated via API.
-    """
-    import mph
-    try:
-        # Connect to the running GUI session
-        client = mph.Client(port=int(os.getenv("COMSOL_PORT", "2036")))  # configured via config.py
-        models = client.models()
+    @mcp.tool()
+    def model_introspect() -> dict:
+        """
+        Reads the currently active model directly from the COMSOL server memory and extracts 
+        the exact Geometry, Physics, Boundary Conditions, Studies, and Results tags.
+        Use this tool to 'learn' a user's manual GUI workflow so it can be replicated via API.
+        """
+        import mph
+        try:
+            # MPh allows one client per process: reuse the session client when it exists.
+            client = session_manager.client
+            if client is None:
+                client = mph.Client(port=int(os.getenv("COMSOL_PORT", "2036")))  # configured via config.py
+            models = client.models()
         
-        if not models:
-            return {"error": "No models found. Please open a model in the COMSOL GUI on port 2036."}
+            if not models:
+                return {"error": "No models found. Please open a model in the COMSOL GUI on port 2036."}
             
-        model = models[-1] # Get the most recently active model
+            model = models[-1] # Get the most recently active model
         
-        recipe = {
-            "model_name": model.name(),
-            "geometry": {},
-            "physics": {},
-            "studies": {},
-            "results":[]
-        }
+            recipe = {
+                "model_name": model.name(),
+                "geometry": {},
+                "physics": {},
+                "studies": {},
+                "results":[]
+            }
         
-        # 1. Extract Geometry
-        for geom_tag in model.java.geom().tags():
-            recipe["geometry"][geom_tag] =[]
-            for feat_tag in model.java.geom(geom_tag).feature().tags():
-                feat_type = model.java.geom(geom_tag).feature(feat_tag).getType()
-                recipe["geometry"][geom_tag].append({"tag": feat_tag, "type": feat_type})
+            # 1. Extract Geometry
+            for geom_tag in model.java.geom().tags():
+                recipe["geometry"][geom_tag] =[]
+                for feat_tag in model.java.geom(geom_tag).feature().tags():
+                    feat_type = model.java.geom(geom_tag).feature(feat_tag).getType()
+                    recipe["geometry"][geom_tag].append({"tag": feat_tag, "type": feat_type})
                 
-        # 2. Extract Physics & Boundary Conditions
-        for phys_tag in model.java.physics().tags():
-            phys_type = model.java.physics(phys_tag).getType()
-            recipe["physics"][phys_tag] = {"type": phys_type, "features":[]}
-            for feat_tag in model.java.physics(phys_tag).feature().tags():
-                feat_type = model.java.physics(phys_tag).feature(feat_tag).getType()
-                recipe["physics"][phys_tag]["features"].append({"tag": feat_tag, "type": feat_type})
+            # 2. Extract Physics & Boundary Conditions
+            for phys_tag in model.java.physics().tags():
+                phys_type = model.java.physics(phys_tag).getType()
+                recipe["physics"][phys_tag] = {"type": phys_type, "features":[]}
+                for feat_tag in model.java.physics(phys_tag).feature().tags():
+                    feat_type = model.java.physics(phys_tag).feature(feat_tag).getType()
+                    recipe["physics"][phys_tag]["features"].append({"tag": feat_tag, "type": feat_type})
                 
-        # 3. Extract Studies
-        for std_tag in model.java.study().tags():
-            recipe["studies"][std_tag] =[]
-            for feat_tag in model.java.study(std_tag).feature().tags():
-                feat_type = model.java.study(std_tag).feature(feat_tag).getType()
-                recipe["studies"][std_tag].append({"tag": feat_tag, "type": feat_type})
+            # 3. Extract Studies
+            for std_tag in model.java.study().tags():
+                recipe["studies"][std_tag] =[]
+                for feat_tag in model.java.study(std_tag).feature().tags():
+                    feat_type = model.java.study(std_tag).feature(feat_tag).getType()
+                    recipe["studies"][std_tag].append({"tag": feat_tag, "type": feat_type})
                 
-        # 4. Extract Results
-        for plot_tag in model.java.result().tags():
-            recipe["results"].append(plot_tag)
+            # 4. Extract Results
+            for plot_tag in model.java.result().tags():
+                recipe["results"].append(plot_tag)
             
-        return recipe
+            return recipe
         
-    except Exception as e:
-        return {"error": f"Failed to introspect model: {str(e)}"}
+        except Exception as e:
+            return {"error": f"Failed to introspect model: {str(e)}"}

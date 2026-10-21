@@ -100,6 +100,8 @@ def register_solver_setup_tools(mcp: FastMCP) -> None:
             jm.sol().create(sol_tag)
             sol = jm.sol(sol_tag)
             sol.study(study_tag)
+            # Without attach, the study runs its own default solver and ignores this one.
+            sol.attach(study_tag)
             sol.label("Segregated Reactor Solver")
 
             # Study step
@@ -262,6 +264,8 @@ def register_solver_setup_tools(mcp: FastMCP) -> None:
             jm.sol().create(sol_tag)
             sol = jm.sol(sol_tag)
             sol.study(study_tag)
+            # Without attach, the study runs its own default solver and ignores this one.
+            sol.attach(study_tag)
             sol.label("FullyCoupled Solver")
 
             sol.create("st1", "StudyStep")

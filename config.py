@@ -19,7 +19,7 @@ PDF_DIR = BASE_DIR / "pdf"
 # COMSOL binary (platform-dependent)
 COMSOL_BIN = os.getenv(
     "COMSOL_BIN",
-    "/Applications/COMSOL63/Multiphysics/bin/comsol"  # macOS default
+    "/Applications/COMSOL64/Multiphysics/bin/comsol"  # macOS default
 )
 
 # Recipe and knowledge base files

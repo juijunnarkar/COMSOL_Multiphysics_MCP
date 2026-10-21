@@ -7,6 +7,46 @@ from .session import session_manager
 from ..async_handler.solver import async_solver
 
 
+def solution_status(model) -> dict:
+    """Return {solution tag: True if it holds computed data}, read from the Java model."""
+    jm = model.java
+    status = {}
+    for tag in [str(t) for t in jm.sol().tags()]:
+        try:
+            status[tag] = not bool(jm.sol(tag).isEmpty())
+        except Exception:
+            status[tag] = False
+    return status
+
+
+def check_solved(model, study_name: Optional[str]) -> dict:
+    """
+    Build the study_solve result after the solver returns.
+
+    COMSOL can return from a study run without computing a solution (for
+    example when the model has no physics). This check makes that a failure.
+    It reads every solution in the model, so an older computed solution also
+    counts as computed.
+    """
+    status = solution_status(model)
+    computed = sorted(t for t, ok in status.items() if ok)
+    empty = sorted(t for t, ok in status.items() if not ok)
+    result = {
+        "success": bool(computed),
+        "study": study_name,
+        "computed_solutions": computed,
+        "empty_solutions": empty,
+    }
+    if computed:
+        result["message"] = "Solving completed."
+    else:
+        result["error"] = (
+            "The study ran, but no solution holds data. "
+            "Check that the model has physics, a material, and a mesh."
+        )
+    return result
+
+
 def register_study_tools(mcp: FastMCP) -> None:
     """Register study and solving tools with the MCP server."""
     
@@ -85,11 +125,7 @@ def register_study_tools(mcp: FastMCP) -> None:
         try:
             if wait:
                 model.solve(study_name)
-                return {
-                    "success": True,
-                    "study": study_name,
-                    "message": "Solving completed.",
-                }
+                return check_solved(model, study_name)
             else:
                 started = async_solver.start_solve(model, study_name)
                 if started:
