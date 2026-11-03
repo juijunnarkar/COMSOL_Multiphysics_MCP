@@ -4,7 +4,194 @@ from typing import Optional, Union, Sequence
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
+from .physics import _component_with_geometry, _numbered_tag
 from .session import session_manager
+
+
+STAT_OPERATIONS = {"max": "Max", "min": "Min", "average": "Av", "integral": "Int"}
+STAT_DIMENSIONS = {3: {"domain": "Volume", "boundary": "Surface"}, 2: {"domain": "Surface", "boundary": "Line"}}
+
+
+def _space_dimension(model) -> int:
+    """Space dimension of the first geometry. A model with no readable geometry counts as 3D."""
+    try:
+        comp, geom_tag = _component_with_geometry(model.java)
+        return int(comp.geom(geom_tag).getSDim())
+    except Exception:
+        return 3
+
+
+def evaluate_stat(
+    model,
+    operation: str,
+    expression: str,
+    entity_type: str,
+    entities: Sequence[int],
+    unit: Optional[str] = None,
+    dataset: Optional[str] = None,
+) -> dict:
+    """
+    Evaluate a max, min, average, or integral over 2D or 3D domains or boundaries.
+
+    The value comes from a COMSOL numerical node, which the function removes
+    after it reads the value. The result reports the entities COMSOL applied.
+    """
+    if operation not in STAT_OPERATIONS:
+        return {"success": False, "error": f"Unknown operation: {operation}. Use one of {sorted(STAT_OPERATIONS)}."}
+    if entity_type not in STAT_DIMENSIONS[3]:
+        return {"success": False, "error": f"Unknown entity_type: {entity_type}. Use one of {sorted(STAT_DIMENSIONS[3])}."}
+    try:
+        requested = [int(e) for e in entities]
+    except (TypeError, ValueError):
+        return {"success": False, "error": f"Entity numbers must be integers: {entities}"}
+    if not requested or any(e < 1 for e in requested):
+        return {"success": False, "error": f"Entity numbers must be 1 or greater: {entities}"}
+
+    numerical = model.java.result().numerical()
+    existing = {str(t) for t in numerical.tags()}
+    i = 1
+    while f"stat{i}" in existing:
+        i += 1
+    tag = f"stat{i}"
+    names = STAT_DIMENSIONS.get(_space_dimension(model), STAT_DIMENSIONS[3])
+    node_type = STAT_OPERATIONS[operation] + names[entity_type]
+    try:
+        node = numerical.create(tag, node_type)
+        try:
+            if dataset:
+                node.set("data", dataset)
+            node.selection().set(requested)
+            applied = [int(e) for e in node.selection().entities()]
+            missing = sorted(set(requested) - set(applied))
+            if missing:
+                return {"success": False, "error": f"COMSOL did not apply {entity_type} entities {missing}."}
+            node.set("expr", [expression])
+            if unit:
+                node.set("unit", [unit])
+            value = float(node.getReal()[0][0])
+        finally:
+            numerical.remove(tag)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to evaluate {operation} of {expression}: {str(e).strip().splitlines()[0]}"}
+    return {
+        "success": True,
+        "operation": operation,
+        "expression": expression,
+        "entity_type": entity_type,
+        "entities": applied,
+        "unit": unit,
+        "value": value,
+    }
+
+
+def _set_properties(node, properties: Optional[dict]) -> None:
+    for name, value in (properties or {}).items():
+        # COMSOL has no single set overload for a Python int, so numbers go as strings.
+        if isinstance(value, (list, tuple)):
+            value = [[str(v) for v in row] if isinstance(row, (list, tuple)) else str(row) for row in value]
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = str(value)
+        node.set(name, value)
+
+
+def _select(node, spec: dict) -> None:
+    """Apply a selection from a plot feature spec. geometry and dimension are optional."""
+    if spec.get("entities") is None:
+        return
+    selection = node.selection()
+    if spec.get("geometry"):
+        selection.geom(spec["geometry"], int(spec["dimension"]))
+    selection.set([int(e) for e in spec["entities"]])
+
+
+def add_dataset(model, dataset_type: str, properties: Optional[dict] = None, label: Optional[str] = None) -> dict:
+    """Add a results dataset, such as a CutPlane, CutLine3D, Mirror3D, or Array3D."""
+    datasets = model.java.result().dataset()
+    tag = _numbered_tag(datasets, "rds")
+    try:
+        node = datasets.create(tag, dataset_type)
+        _set_properties(node, properties)
+        if label:
+            node.label(label)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to add dataset {dataset_type}: {str(e).splitlines()[0]}"}
+    return {"success": True, "dataset": tag, "type": dataset_type}
+
+
+def add_plot(
+    model,
+    group_type: str,
+    features: Sequence[dict],
+    dataset: Optional[str] = None,
+    label: Optional[str] = None,
+    properties: Optional[dict] = None,
+) -> dict:
+    """
+    Add a plot group with its plot features, then run it.
+
+    Each feature is a dict with type, and optional properties, entities, geometry, dimension,
+    and subfeatures. A subfeature has the same keys, for example a Color Expression on a Streamline.
+    """
+    if not features:
+        return {"success": False, "error": "Give at least one plot feature."}
+    result = model.java.result()
+    tag = _numbered_tag(result, "pg")
+    try:
+        group = result.create(tag, group_type)
+        if dataset:
+            group.set("data", dataset)
+        _set_properties(group, properties)
+        if label:
+            group.label(label)
+        made = []
+        for spec in features:
+            ftag = f"{spec['type'][:4].lower()}{len(made) + 1}"
+            node = group.create(ftag, spec["type"])
+            _set_properties(node, spec.get("properties"))
+            _select(node, spec)
+            for j, sub in enumerate(spec.get("subfeatures", ()), start=1):
+                child = node.create(f"{sub['type'][:3].lower()}{j}", sub["type"])
+                _set_properties(child, sub.get("properties"))
+                _select(child, sub)
+            made.append(ftag)
+        group.run()
+    except Exception as e:
+        detail = " ".join(str(e).split())[:500]
+        return {"success": False, "error": f"Failed to add plot {group_type}: {detail}"}
+    return {"success": True, "plot_group": tag, "features": made}
+
+
+def clear_plots(model) -> dict:
+    """Remove all plot groups and the datasets that add_dataset made, so a rerun starts clean."""
+    result = model.java.result()
+    groups = [str(t) for t in result.tags()]
+    for tag in groups:
+        result.remove(tag)
+    added = [str(t) for t in result.dataset().tags() if str(t).startswith("rds")]
+    for tag in added:
+        result.dataset().remove(tag)
+    return {"success": True, "plot_groups": groups, "datasets": added}
+
+
+def export_plot_image(model, plot_group: str, file_path: str, width: int = 1400, height: int = 900, font_size: int = 14) -> dict:
+    """Write a plot group to a PNG file with a white background. The Image node is removed after it runs."""
+    exports = model.java.result().export()
+    tag = _numbered_tag(exports, "pimg")
+    Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        node = exports.create(tag, plot_group, "Image")
+        try:
+            # Without background = color, a server export gives a transparent PNG, which a dark viewer shows as black.
+            _set_properties(node, {"imagetype": "png", "pngfilename": str(file_path), "size": "manualweb", "unit": "px",
+                                   "width": str(width), "height": str(height), "fontsize": str(font_size),
+                                   "background": "color", "options1d": "on", "options2d": "on", "options3d": "on",
+                                   "logo1d": "off", "logo2d": "off", "logo3d": "off"})
+            node.run()
+        finally:
+            exports.remove(tag)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to export {plot_group}: {' '.join(str(e).split())[:400]}"}
+    return {"success": True, "plot_group": plot_group, "file": str(file_path)}
 
 
 def register_results_tools(mcp: FastMCP) -> None:
@@ -72,6 +259,40 @@ def register_results_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": f"Failed to evaluate: {str(e)}"}
     
     @mcp.tool()
+    def results_stat(
+        operation: str,
+        expression: str,
+        entity_type: str,
+        entities: Sequence[int],
+        unit: Optional[str] = None,
+        dataset: Optional[str] = None,
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Evaluate a max, min, average, or integral over chosen domains or boundaries of a 2D or 3D model.
+
+        Example: the maximum temperature in domain 1 is
+        results_stat("max", "T", "domain", [1], unit="degC").
+        Get the numbers from geometry_get_domains and geometry_get_boundaries.
+
+        Args:
+            operation: "max", "min", "average", or "integral"
+            expression: COMSOL expression, e.g. "T" or "ht.ntflux"
+            entity_type: "domain" or "boundary"
+            entities: Domain or boundary numbers
+            unit: Result unit, e.g. "degC" (default: model unit)
+            dataset: Dataset tag (default: first dataset of the model)
+            model_name: Model name (default: current model)
+
+        Returns:
+            The value and the entities COMSOL applied, or an error
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        return evaluate_stat(model, operation, expression, entity_type, entities, unit, dataset)
+
+    @mcp.tool()
     def results_global_evaluate(
         expression: str,
         unit: Optional[str] = None,
@@ -93,7 +314,8 @@ def register_results_tools(mcp: FastMCP) -> None:
             model_name: Model name (default: current model)
         
         Returns:
-            Single numerical value
+            The first value in "value", and all values in "values" when the
+            dataset has several time steps or parameter values
         """
         model = session_manager.get_model(model_name)
         if model is None:
@@ -106,17 +328,16 @@ def register_results_tools(mcp: FastMCP) -> None:
             result = model.evaluate(expression, unit=unit, dataset=dataset)
             
             import numpy as np
-            if isinstance(result, np.ndarray):
-                value = float(result.flatten()[0])
-            else:
-                value = float(result)
-            
-            return {
+            values = np.asarray(result, dtype=float).flatten()
+            answer = {
                 "success": True,
                 "expression": expression,
                 "unit": unit,
-                "value": value,
+                "value": float(values[0]),
             }
+            if values.size > 1:
+                answer["values"] = values.tolist()
+            return answer
         except Exception as e:
             return {"success": False, "error": f"Failed to evaluate global expression: {str(e)}"}
     
@@ -262,6 +483,112 @@ def register_results_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": f"Failed to export image: {str(e)}"}
     
+    @mcp.tool()
+    def results_dataset_add(
+        dataset_type: str,
+        properties: Optional[dict] = None,
+        label: Optional[str] = None,
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Add a results dataset that a plot can read.
+
+        Example: a cut plane at z = 12 mm is results_dataset_add("CutPlane",
+        {"data": "dset2", "quickplane": "xy", "quickz": "12[mm]"}).
+
+        Args:
+            dataset_type: COMSOL type, e.g. "CutPlane", "CutLine3D", "Mirror3D", "Array3D"
+            properties: COMSOL property names and values
+            label: Name shown in the model tree
+            model_name: Model name (default: current model)
+
+        Returns:
+            The new dataset tag, or an error
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        return add_dataset(model, dataset_type, properties, label)
+
+    @mcp.tool()
+    def results_plot_add(
+        group_type: str,
+        features: Sequence[dict],
+        dataset: Optional[str] = None,
+        label: Optional[str] = None,
+        properties: Optional[dict] = None,
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Add a plot group with its plot features, and run it. The plot stays in the model.
+
+        Each feature is a dict: type (e.g. "Surface", "Slice", "Streamline", "ArrowVolume",
+        "LineGraph"), and optional properties, entities, geometry, dimension, and subfeatures.
+        A subfeature has the same keys, e.g. a "Color" expression on a streamline, or a
+        "Selection" with geometry and dimension to limit a surface plot to chosen faces.
+
+        Args:
+            group_type: "PlotGroup3D", "PlotGroup2D", or "PlotGroup1D"
+            features: Plot features, in draw order
+            dataset: Dataset tag for the group
+            label: Name shown in the model tree
+            properties: Plot group property names and values
+            model_name: Model name (default: current model)
+
+        Returns:
+            The plot group tag and feature tags, or an error
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        return add_plot(model, group_type, features, dataset, label, properties)
+
+    @mcp.tool()
+    def results_plots_clear(model_name: Optional[str] = None) -> dict:
+        """
+        Remove all plot groups, and the datasets added with results_dataset_add.
+
+        Args:
+            model_name: Model name (default: current model)
+
+        Returns:
+            The removed tags, or an error
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        return clear_plots(model)
+
+    @mcp.tool()
+    def results_plot_image(
+        plot_group: str,
+        file_path: str,
+        width: int = 1400,
+        height: int = 900,
+        font_size: int = 14,
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Write a plot group to a PNG file with a white background and no logo.
+
+        Start mphserver with -graphics for 3D plots.
+
+        Args:
+            plot_group: Plot group tag from results_plot_add
+            file_path: Output PNG path
+            width: Image width in pixels
+            height: Image height in pixels
+            font_size: Font size
+            model_name: Model name (default: current model)
+
+        Returns:
+            The file path, or an error
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        return export_plot_image(model, plot_group, file_path, width, height, font_size)
+
     @mcp.tool()
     def results_exports_list(model_name: Optional[str] = None) -> dict:
         """

@@ -42,16 +42,22 @@ class FakeSelection:
         self.calls.append("named")
         self.named_selection = name
 
-    def entities(self, dim):
-        if dim != self.dim:
+    def entities(self, dim=None):
+        if dim is not None and dim != self.dim:
             raise RuntimeError(f"No entities at dimension {dim}")
         return list(self.entities_set)
 
 
 class FakeTagList:
-    def __init__(self, tags=(), create=None):
+    def __init__(self, tags=(), create=None, lookup=None):
         self._tags = list(tags)
         self._create = create
+        self._lookup = lookup
+
+    def get(self, tag):
+        if self._lookup is None:
+            raise RuntimeError("get is not supported here")
+        return self._lookup(tag)
 
     def tags(self):
         return list(self._tags)
@@ -100,15 +106,29 @@ class FakeMaterial:
         return self.group
 
 
+class FakeInterfaceGroup:
+    def __init__(self, known):
+        self.known = known
+        self.values: dict[str, str] = {}
+
+    def set(self, name, value):
+        if name not in self.known:
+            raise RuntimeError(f"Exception:\n\tcom.comsol.util.exceptions.FlException: Unknown property {name}.")
+        self.values[name] = value
+
+
 class FakeFeature:
     """A physics feature. set() accepts only the names in `params`, as COMSOL does."""
 
     PARAMS = {
         "TemperatureBoundary": {"T0"},
-        "HeatFluxBoundary": {"q0", "HeatFluxType", "h", "Text"},
+        "HeatFluxBoundary": {"q0_input", "HeatFluxType", "h", "Text"},
         "Fixed": set(),
+        "FluidHeatTransferModel": set(),
         "InletBoundary": {"U0in"},
         "OutletBoundary": {"p0"},
+        "Hexahedron": {"p"},
+        "Block": {"pos", "size"},
     }
 
     def __init__(self, tag, ftype, dim, n_entities):
@@ -152,6 +172,7 @@ class FakePhysics:
         self.features: dict[str, FakeFeature] = {}
         self._feature_list = FakeTagList(create=self._create_feature)
         self._sel = FakeSelection(comp.n_domains, comp.sdim)
+        self.groups = {"AdvancedSettingProperty": FakeInterfaceGroup({"PseudoTimeSetting", "useBNS"})}
 
     def tag(self):
         return self._tag
@@ -163,6 +184,11 @@ class FakePhysics:
 
     def selection(self):
         return self._sel
+
+    def prop(self, group):
+        if group not in self.groups:
+            raise RuntimeError("Exception:\n\tUnknown property.")
+        return self.groups[group]
 
     def _create_feature(self, tag, ftype, dim=None):
         if dim is None:
@@ -193,6 +219,16 @@ class FakeGeom:
         self.size = size
         self._n_domains = n_domains
         self.runs = 0
+        self.reject_range_end = False
+        self.features = {}
+        self._feature_list = FakeTagList(create=self._create_feature)
+
+    def _create_feature(self, tag, ftype):
+        self.features[tag] = FakeFeature(tag, ftype, self._sdim, 0)
+        return self.features[tag]
+
+    def feature(self, tag=None):
+        return self._feature_list if tag is None else self.features[tag]
 
     def getSDim(self):
         return self._sdim
@@ -206,6 +242,20 @@ class FakeGeom:
     def getNDomains(self):
         return self._n_domains
 
+    def getNEdges(self):
+        return 2
+
+    def edgeParamRange(self, edge):
+        return [0.0, self.size[edge - 1] * 1000]
+
+    def edgeX(self, edge, params):
+        # Edge 1 lies along x and edge 2 along y, both from the origin.
+        return [[s / 1000 if k == edge - 1 else 0.0 for k in range(3)] for s in params]
+
+    def getUpDown(self):
+        # One domain inside every face. Domain 0 is the outside.
+        return [[0] * self.getNBoundaries(), [1] * self.getNBoundaries()]
+
     def faceParamRange(self, face):
         _, _, (a, b) = self.FACES[face]
         return [0.0, self.size[a] * 1000, 0.0, self.size[b] * 1000]
@@ -214,6 +264,8 @@ class FakeGeom:
         axis, at_max, (a, b) = self.FACES[face]
         out = []
         for u, v in uv:
+            if self.reject_range_end and (u >= self.size[a] * 1000 or v >= self.size[b] * 1000):
+                raise ValueError("Face parameter out of range")
             p = [0.0, 0.0, 0.0]
             p[axis] = self.size[axis] if at_max else 0.0
             p[a], p[b] = u / 1000, v / 1000
@@ -242,6 +294,10 @@ class FakeComponent:
         self._material_list = FakeTagList(self._materials, create=self._create_material)
         self._physics = {}
         self._physics_list = FakeTagList(create=self._create_physics)
+        self.couplings = {}
+        self.meshes = {}
+        self._mesh_list = FakeTagList(create=self._create_mesh)
+        self._coupling_list = FakeTagList(create=self._create_coupling)
         for ptag in physics:
             self._physics_list.create(ptag, "HeatTransfer", self._geom_tags[0] if self._geom_tags else "geom1")
 
@@ -275,35 +331,332 @@ class FakeComponent:
             return self._physics_list
         return self._physics[tag]
 
+    def _create_coupling(self, tag, ctype, dim):
+        if dim != self.sdim:
+            raise RuntimeError("The coupling needs the space dimension")
+        self.couplings[tag] = FakeCoupling(tag, ctype, dim)
+        return self.couplings[tag]
+
+    def multiphysics(self):
+        return self._coupling_list
+
+    def _create_mesh(self, tag):
+        self.meshes[tag] = FakeMeshStep("Mesh")
+        return self.meshes[tag]
+
+    def mesh(self, tag=None):
+        return self._mesh_list if tag is None else self.meshes[tag]
+
     def geom(self, tag=None):
         if tag is None:
-            return FakeTagList(self._geom_tags)
+            return FakeTagList(self._geom_tags, lookup=self.geom)
         if tag not in self._geom_tags:
             raise RuntimeError(f"Unknown geometry {tag}")
         return self._geom
 
 
+class FakeCoupling:
+    PARAMS = {"NonIsothermalFlow": {"Fluid_physics", "Heat_physics"}}
+
+    def __init__(self, tag, ctype, dim):
+        self.tag = tag
+        self.type = ctype
+        self.dim = dim
+        self.values = {}
+
+    def set(self, name, value):
+        if name not in self.PARAMS.get(self.type, set()):
+            raise RuntimeError(f"Exception:\n\tUnknown parameter {name}.\nMessages:\n\tUnknown parameter {name}.")
+        self.values[name] = value
+
+
+class FakeStudyStep:
+    KNOWN = {"useparam", "pname", "plistarr", "punit"}
+
+    def __init__(self):
+        self.solve_for = {}
+        self.values = {}
+
+    def setSolveFor(self, path, active):
+        self.solve_for[path] = active
+
+    def set(self, name, value):
+        if name not in self.KNOWN:
+            raise RuntimeError(f"Exception:\n\tUnknown property {name}.")
+        self.values[name] = value
+
+
+class FakeStudy:
+    def __init__(self):
+        self.steps = {}
+        self.step_nodes = {}
+
+    def create(self, tag, stype):
+        self.steps[tag] = stype
+        self.step_nodes[tag] = FakeStudyStep()
+
+    def feature(self, tag):
+        return self.step_nodes[tag]
+
+
+class FakeSizeNode:
+    def __init__(self):
+        self.values = {}
+
+    def set(self, name, value):
+        self.values[name] = value
+
+
+class FakeMeshSeq:
+    def __init__(self):
+        self.size = FakeSizeNode()
+        self.created = {}
+
+    def create(self, tag, ftype):
+        self.created[tag] = ftype
+
+    def feature(self, tag):
+        assert tag == "size"
+        return self.size
+
+
+class FakeMeshStep:
+    PARAMS = {"Size": {"hmax", "hmin"}, "Distribution": {"numelem"}, "FreeTri": set(), "Sweep": set(), "FreeTet": set()}
+
+    def __init__(self, ftype):
+        self.type = ftype
+        self.values = {}
+        self.sel = FakeSelection(1000, 3)
+        self.geom_args = None
+        self.remaining_called = False
+        self.named: dict[str, FakeSelection] = {}
+        self._steps = {}
+        self._list = FakeTagList(create=self._create)
+
+    def _create(self, tag, ftype):
+        self._steps[tag] = FakeMeshStep(ftype)
+        return self._steps[tag]
+
+    def create(self, tag, ftype):
+        return self._list.create(tag, ftype)
+
+    def feature(self, tag=None):
+        return self._list if tag is None else self._steps[tag]
+
+    def selection(self, name=None):
+        if name is None:
+            step = self
+
+            class Sel(FakeSelection):
+                def geom(self, tag, dim):
+                    step.geom_args = (tag, dim)
+
+                def remaining(self):
+                    step.remaining_called = True
+            sel = Sel(1000, 3)
+            self.sel = sel
+            return sel
+        if name not in {"sourceface", "targetface"}:
+            raise RuntimeError(f"Exception:\n\tUnknown selection {name}.")
+        return self.named.setdefault(name, FakeSelection(1000, 2))
+
+    def set(self, name, value):
+        if name not in self.PARAMS.get(self.type, set()):
+            raise RuntimeError(f"Exception:\n\tUnknown property {name}.")
+        self.values[name] = value
+
+
+class FakeSolverFeature:
+    def __init__(self, stype, children=None, known=()):
+        self.stype = stype
+        self.children = children or {}
+        self.known = set(known)
+        self.values: dict[str, str] = {}
+
+    def getType(self):
+        return self.stype
+
+    def feature(self, tag=None):
+        return FakeTagList(self.children) if tag is None else self.children[tag]
+
+    def set(self, name, value):
+        if name not in self.known:
+            raise RuntimeError("Exception:\n\tUnknown property.")
+        self.values[name] = value
+
+
 class FakeSolution:
     def __init__(self, empty: bool):
         self._empty = empty
+        self._study = None
+        self.children = {}
 
     def isEmpty(self):
         return self._empty
+
+    def study(self, tag=None):
+        if tag is not None:
+            self._study = tag
+        return self._study
+
+    def attach(self, tag):
+        self.attached = tag
+
+    def createAutoSequence(self, study_tag):
+        self.children = {"t1": FakeSolverFeature("Time", {"fc1": FakeSolverFeature("FullyCoupled", known={"maxiter"})},
+                                                 known={"maxstepbdf"})}
+
+    def feature(self, tag=None):
+        return FakeTagList(self.children) if tag is None else self.children[tag]
+
+
+class FakeNumerical:
+    """A numerical evaluation node. Entities above n_entities are dropped, as COMSOL does."""
+
+    def __init__(self, tag, ntype, n_entities, value):
+        self.tag = tag
+        self.type = ntype
+        self.values = {}
+        self._value = value
+        self._sel = FakeSelection(n_entities, 3)
+
+    def selection(self):
+        return self._sel
+
+    def set(self, name, value):
+        self.values[name] = value
+
+    def getReal(self):
+        return [[self._value]]
+
+
+class FakePlotSelection:
+    def __init__(self, node):
+        self.node = node
+
+    def geom(self, tag, dimension):
+        self.node.geom_dim = (tag, dimension)
+
+    def set(self, entities):
+        self.node.selected = list(entities)
+
+
+class FakePlotNode:
+    """A dataset, plot group, plot feature, or export node."""
+
+    def __init__(self, tag, ntype, parent=None):
+        self.tag = tag
+        self.type = ntype
+        self.parent = parent
+        self.values = {}
+        self.children = {}
+        self.ran = 0
+        self.geom_dim = None
+        self.selected = None
+
+    def set(self, name, value):
+        self.values[name] = value
+
+    def label(self, text):
+        self.values["label"] = text
+
+    def create(self, tag, ntype):
+        if ntype == "BadPlot":
+            raise RuntimeError("Unknown feature type BadPlot\nsecond line")
+        self.children[tag] = FakePlotNode(tag, ntype, self)
+        return self.children[tag]
+
+    def selection(self):
+        return FakePlotSelection(self)
+
+    def run(self):
+        self.ran += 1
+
+
+class FakeResult:
+    def __init__(self):
+        self.created: list[FakeNumerical] = []
+        self.value = 42.0
+        self.n_entities = 6
+        self._list = FakeTagList(create=self._create)
+        self.groups = {}
+        self.datasets = {}
+        self.exported = []
+        self._groups = FakeTagList(create=self._create_group)
+        self._datasets = FakeTagList(create=self._create_dataset)
+        self._exports = FakeTagList(create=self._create_export)
+
+    def _create_group(self, tag, ntype):
+        self.groups[tag] = FakePlotNode(tag, ntype)
+        return self.groups[tag]
+
+    def _create_dataset(self, tag, ntype):
+        if ntype == "BadSet":
+            raise RuntimeError("Unknown dataset type")
+        self.datasets[tag] = FakePlotNode(tag, ntype)
+        return self.datasets[tag]
+
+    def _create_export(self, tag, group, ntype):
+        node = FakePlotNode(tag, ntype, group)
+        self.exported.append(node)
+        return node
+
+    def create(self, tag, ntype):
+        return self._groups.create(tag, ntype)
+
+    def tags(self):
+        return self._groups.tags()
+
+    def remove(self, tag):
+        self._groups.remove(tag)
+
+    def dataset(self):
+        return self._datasets
+
+    def export(self):
+        return self._exports
+
+    def _create(self, tag, ntype):
+        if ntype not in {f"{op}{dim}" for op in ("Max", "Min", "Av", "Int") for dim in ("Volume", "Surface", "Line")}:
+            raise RuntimeError(f"Unknown numerical type {ntype}")
+        node = FakeNumerical(tag, ntype, self.n_entities, self.value)
+        self.created.append(node)
+        return node
+
+    def numerical(self):
+        return self._list
 
 
 class FakeJavaModel:
     def __init__(self, components, solutions=None):
         self._components = list(components)
         self._solutions = {t: FakeSolution(e) for t, e in (solutions or {}).items()}
+        self._result = FakeResult()
+        self.studies = {}
+        self._study_list = FakeTagList(create=self._create_study)
+
+    def result(self):
+        return self._result
+
+    def _create_study(self, tag):
+        self.studies[tag] = FakeStudy()
+        return self.studies[tag]
+
+    def study(self, tag=None):
+        return self._study_list if tag is None else self.studies[tag]
 
     def component(self, tag=None):
         if tag is None:
             return list(self._components)
         return next(c for c in self._components if c.tag() == tag)
 
+    def _create_sol(self, tag):
+        self._solutions[tag] = FakeSolution(True)
+        return self._solutions[tag]
+
     def sol(self, tag=None):
         if tag is None:
-            return FakeTagList(self._solutions)
+            return FakeTagList(self._solutions, create=self._create_sol)
         return self._solutions[tag]
 
 

@@ -72,3 +72,30 @@ class TestSessionManager:
         sm = SessionManager()
         status = sm.get_status()
         assert status["connected"] is False
+
+
+def test_progress_log_needs_a_connection():
+    from src.tools.session import SessionManager
+
+    manager = SessionManager()
+    assert manager.progress_log("run.log")["success"] is False
+
+
+def test_progress_log_calls_show_progress():
+    from src.tools.session import SessionManager
+
+    class Java:
+        path = None
+
+        def showProgress(self, path):
+            Java.path = path
+
+    class Client:
+        java = Java()
+
+    manager = SessionManager()
+    manager._client = Client()
+    result = manager.progress_log("run.log")
+    manager._client = None
+    assert result == {"success": True, "log_file": "run.log"}
+    assert Java.path == "run.log"
