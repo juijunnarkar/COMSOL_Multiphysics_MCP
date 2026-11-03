@@ -73,6 +73,16 @@ class SessionManager:
                 "hint": "Standalone start failed. If a COMSOL server is running, use comsol_connect(port=...) instead."
             }
     
+    def progress_log(self, file_path: str) -> dict:
+        """Log solver progress to a file through ModelUtil.showProgress."""
+        if self._client is None:
+            return {"success": False, "error": "Not connected. Call comsol_connect first."}
+        try:
+            self._client.java.showProgress(str(file_path))
+        except Exception as e:
+            return {"success": False, "error": f"Could not start the progress log: {str(e).strip().splitlines()[0]}"}
+        return {"success": True, "log_file": str(file_path)}
+
     def connect(self, port: int, host: str = "localhost") -> dict:
         """Connect to a remote COMSOL server."""
         if self._client is not None:
@@ -234,6 +244,22 @@ def register_session_tools(mcp: FastMCP) -> None:
         """
         return session_manager.disconnect()
     
+    @mcp.tool()
+    def comsol_progress_log(file_path: str) -> dict:
+        """
+        Write solver progress to a file on this computer during every later solve.
+
+        Read the file during a long solve to find a diverged run early. The
+        COMSOL API method is ModelUtil.showProgress(filename).
+
+        Args:
+            file_path: Log file path
+
+        Returns:
+            The log file path, or an error
+        """
+        return session_manager.progress_log(file_path)
+
     @mcp.tool()
     def comsol_status() -> dict:
         """

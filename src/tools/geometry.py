@@ -44,6 +44,38 @@ def _count_features(geom_node) -> int:
         return 0
 
 
+def add_feature(model, feature_type: str, properties: Optional[dict] = None, feature_name: Optional[str] = None,
+                geometry_name: Optional[str] = None, component_name: str = "comp1") -> dict:
+    """Add any geometry feature through the Java API and set its properties.
+
+    Numbers go as strings and a list of lists goes as a string matrix, because COMSOL has no set
+    overload for a Python int. A property that COMSOL rejects is reported, not dropped.
+    """
+    geom, error = _get_geometry_node(model, geometry_name, component_name)
+    if error:
+        return {"success": False, "error": error}
+    existing = [str(t) for t in geom.feature().tags()]
+    prefix = feature_type[:3].lower()
+    tag = feature_name or next(f"{prefix}{i}" for i in range(1, len(existing) + 2) if f"{prefix}{i}" not in existing)
+    feature = geom.feature().create(tag, feature_type)
+    rejected = {}
+    for name, value in (properties or {}).items():
+        if isinstance(value, (list, tuple)):
+            value = [[str(v) for v in row] if isinstance(row, (list, tuple)) else str(row) for row in value]
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = str(value)
+        try:
+            feature.set(name, value)
+        except Exception as e:
+            text = str(e).strip()
+            rejected[name] = text.splitlines()[-1].strip() if text else type(e).__name__
+    result = {"success": not rejected, "feature": {"name": tag, "type": feature_type, "properties": sorted(properties or {})}}
+    if rejected:
+        result["rejected_properties"] = rejected
+        result["error"] = f"COMSOL rejected properties {sorted(rejected)}."
+    return result
+
+
 def register_geometry_tools(mcp: FastMCP) -> None:
     """Register geometry tools with the MCP server."""
     
@@ -129,72 +161,37 @@ def register_geometry_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def geometry_add_feature(
         feature_type: str,
+        properties: Optional[dict] = None,
         geometry_name: Optional[str] = None,
         feature_name: Optional[str] = None,
-        model_name: Optional[str] = None,
-        **kwargs
+        component_name: str = "comp1",
+        model_name: Optional[str] = None
     ) -> dict:
         """
-        Add a geometry feature to a geometry sequence.
-        
-        Common feature types:
-        - Block: Rectangular block (3D)
-        - Cylinder: Cylinder (3D)
-        - Sphere: Sphere (3D)
-        - Cone: Cone (3D)
-        - WorkPlane: Working plane for 2D geometry
-        - Rectangle: Rectangle (2D)
-        - Circle: Circle (2D)
-        - Polygon: Polygon from points
-        - Import: Import CAD geometry
-        - Union, Intersection, Difference: Boolean operations
-        
+        Add any geometry feature to a geometry sequence and set its properties.
+
+        Use it for features that have no tool of their own, for example a Hexahedron from 8 corner points
+        (feature_type="Hexahedron", properties={"p": [[x1..x8], [y1..y8], [z1..z8]]}), a Cone, or a Polygon.
+
         Args:
-            feature_type: Type of geometry feature (Block, Cylinder, etc.)
-            geometry_name: Geometry sequence name (default: first geometry)
-            feature_name: Name for the feature (auto-generated if None)
+            feature_type: COMSOL feature type, for example Hexahedron, Cone, Polygon, Union, Difference
+            properties: COMSOL property names mapped to values. Numbers and number lists are sent as strings.
+            geometry_name: Geometry sequence tag (default: first geometry)
+            feature_name: Feature tag (default: first three letters of the type and a free number)
+            component_name: Component tag (default: 'comp1')
             model_name: Model name (default: current model)
-            **kwargs: Feature-specific properties (position, size, etc.)
-        
+
         Returns:
-            Created feature info
+            The feature tag and type. Any property COMSOL rejected is listed, and success is then false.
         """
         model = session_manager.get_model(model_name)
         if model is None:
-            return {
-                "success": False,
-                "error": f"Model not found: {model_name or 'no current model'}"
-            }
-        
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
         try:
-            geometries = model.geometries()
-            if not geometries:
-                return {"success": False, "error": "No geometry sequences found. Create one first."}
-            
-            target_geom = geometry_name or geometries[0]
-            if target_geom not in geometries:
-                return {"success": False, "error": f"Geometry not found: {target_geom}"}
-            
-            geom_node = model / "geometries" / target_geom
-            feature_node = geom_node.create(feature_type, feature_name)
-            
-            for prop_name, prop_value in kwargs.items():
-                try:
-                    feature_node.property(prop_name, prop_value)
-                except Exception:
-                    pass
-            
-            return {
-                "success": True,
-                "feature": {
-                    "name": feature_node.name() if hasattr(feature_node, 'name') else feature_name,
-                    "type": feature_type,
-                    "geometry": target_geom,
-                }
-            }
+            return add_feature(model, feature_type, properties, feature_name, geometry_name, component_name)
         except Exception as e:
             return {"success": False, "error": f"Failed to add geometry feature: {str(e)}"}
-    
+
     @mcp.tool()
     def geometry_add_block(
         position: Sequence[float] = (0, 0, 0),

@@ -69,22 +69,22 @@ ARES-Sim BO  ──>  comsol_bridge  ──>  MPh layer (same connection)
 
 ## Tool Reference
 
-The server registers 90 MCP tools. `tests/test_readme_tools.py` checks
+The server registers 105 MCP tools. `tests/test_readme_tools.py` checks
 that this table lists every registered tool and no other tool. Each tool's
 docstring gives its parameters.
 
 | Group | Tools |
 |-------|-------|
-| Session | `comsol_start`, `comsol_connect`, `comsol_disconnect`, `comsol_status` |
+| Session | `comsol_start`, `comsol_connect`, `comsol_disconnect`, `comsol_status`, `comsol_progress_log` |
 | Model | `model_introspect`, `model_load`, `model_create`, `model_create_component`, `model_list_components`, `model_save`, `model_save_version`, `model_list`, `model_set_current`, `model_clone`, `model_remove`, `model_inspect` |
 | Parameters | `param_get`, `param_set`, `param_list`, `param_sweep_setup`, `param_description` |
-| Geometry | `geometry_list`, `geometry_create`, `geometry_add_feature`, `geometry_add_block`, `geometry_add_cylinder`, `geometry_add_sphere`, `geometry_add_rectangle`, `geometry_add_circle`, `geometry_boolean_union`, `geometry_boolean_difference`, `geometry_import`, `geometry_build`, `geometry_list_features`, `geometry_get_boundaries` |
-| Physics and materials | `physics_list`, `physics_get_available`, `physics_add`, `physics_add_electrostatics`, `physics_add_solid_mechanics`, `physics_add_heat_transfer`, `physics_add_laminar_flow`, `physics_configure_boundary`, `material_create`, `physics_set_material`, `multiphysics_add`, `physics_list_features`, `physics_remove`, `physics_interactive_setup_flow`, `physics_setup_flow_boundaries`, `physics_interactive_setup_heat`, `physics_setup_heat_boundaries`, `physics_boundary_selection` |
-| Mesh | `mesh_list`, `mesh_create`, `mesh_info`, `mesh_quality_report`, `mesh_refine_local`, `mesh_boundary_layer` |
+| Geometry | `geometry_list`, `geometry_create`, `geometry_add_feature`, `geometry_add_block`, `geometry_add_cylinder`, `geometry_add_sphere`, `geometry_add_rectangle`, `geometry_add_circle`, `geometry_boolean_union`, `geometry_boolean_difference`, `geometry_import`, `geometry_build`, `geometry_list_features`, `geometry_get_boundaries`, `geometry_get_domains`, `geometry_get_edges` |
+| Physics and materials | `physics_list`, `physics_get_available`, `physics_add`, `physics_add_electrostatics`, `physics_add_solid_mechanics`, `physics_add_heat_transfer`, `physics_add_laminar_flow`, `physics_configure_boundary`, `physics_configure_domain`, `physics_set_property`, `material_create`, `material_set_property`, `physics_set_material`, `multiphysics_add`, `physics_list_features`, `physics_remove`, `physics_interactive_setup_flow`, `physics_setup_flow_boundaries`, `physics_interactive_setup_heat`, `physics_setup_heat_boundaries`, `physics_boundary_selection` |
+| Mesh | `mesh_list`, `mesh_create`, `mesh_add_feature`, `mesh_info`, `mesh_quality_report`, `mesh_refine_local`, `mesh_boundary_layer` |
 | Reactor mesh (FCCVD defaults) | `mesh_reactor_2d`, `mesh_reactor_3d` |
-| Study | `study_list`, `study_solve`, `study_solve_async`, `study_get_progress`, `study_cancel`, `study_wait`, `solutions_list`, `datasets_list` |
+| Study | `study_list`, `study_create`, `study_configure_step`, `study_configure_solver`, `study_solve`, `study_solve_async`, `study_get_progress`, `study_cancel`, `study_wait`, `solutions_list`, `datasets_list` |
 | Solver setup | `solver_segregated_reactor`, `solver_fully_coupled`, `solver_parametric_sweep`, `solver_convergence_monitor`, `solver_diagnostics` |
-| Results | `results_evaluate`, `results_global_evaluate`, `results_inner_values`, `results_outer_values`, `results_export_data`, `results_export_image`, `results_exports_list`, `results_plots_list` |
+| Results | `results_evaluate`, `results_stat`, `results_global_evaluate`, `results_inner_values`, `results_outer_values`, `results_export_data`, `results_export_image`, `results_exports_list`, `results_plots_list`, `results_dataset_add`, `results_plot_add`, `results_plot_image`, `results_plots_clear` |
 | Documentation | `docs_get`, `docs_list`, `physics_get_guide`, `troubleshoot`, `modeling_best_practices`, `pdf_search`, `pdf_search_status`, `pdf_list_modules` |
 
 ### Workflow scripts (not MCP tools yet)
