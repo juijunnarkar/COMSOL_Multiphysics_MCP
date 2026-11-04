@@ -69,7 +69,7 @@ ARES-Sim BO  ──>  comsol_bridge  ──>  MPh layer (same connection)
 
 ## Tool Reference
 
-The server registers 105 MCP tools. `tests/test_readme_tools.py` checks
+The server registers 108 MCP tools. `tests/test_readme_tools.py` checks
 that this table lists every registered tool and no other tool. Each tool's
 docstring gives its parameters.
 
@@ -82,9 +82,9 @@ docstring gives its parameters.
 | Physics and materials | `physics_list`, `physics_get_available`, `physics_add`, `physics_add_electrostatics`, `physics_add_solid_mechanics`, `physics_add_heat_transfer`, `physics_add_laminar_flow`, `physics_configure_boundary`, `physics_configure_domain`, `physics_set_property`, `material_create`, `material_set_property`, `physics_set_material`, `multiphysics_add`, `physics_list_features`, `physics_remove`, `physics_interactive_setup_flow`, `physics_setup_flow_boundaries`, `physics_interactive_setup_heat`, `physics_setup_heat_boundaries`, `physics_boundary_selection` |
 | Mesh | `mesh_list`, `mesh_create`, `mesh_add_feature`, `mesh_info`, `mesh_quality_report`, `mesh_refine_local`, `mesh_boundary_layer` |
 | Reactor mesh (FCCVD defaults) | `mesh_reactor_2d`, `mesh_reactor_3d` |
-| Study | `study_list`, `study_create`, `study_configure_step`, `study_configure_solver`, `study_solve`, `study_solve_async`, `study_get_progress`, `study_cancel`, `study_wait`, `solutions_list`, `datasets_list` |
+| Study | `study_list`, `study_create`, `study_configure_step`, `study_configure_solver`, `study_transient_from_solution`, `study_use_solution`, `study_solve`, `study_solve_async`, `study_get_progress`, `study_cancel`, `study_wait`, `solutions_list`, `datasets_list` |
 | Solver setup | `solver_segregated_reactor`, `solver_fully_coupled`, `solver_parametric_sweep`, `solver_convergence_monitor`, `solver_diagnostics` |
-| Results | `results_evaluate`, `results_stat`, `results_global_evaluate`, `results_inner_values`, `results_outer_values`, `results_export_data`, `results_export_image`, `results_exports_list`, `results_plots_list`, `results_dataset_add`, `results_plot_add`, `results_plot_image`, `results_plots_clear` |
+| Results | `results_evaluate`, `results_probe_time_series`, `results_stat`, `results_global_evaluate`, `results_inner_values`, `results_outer_values`, `results_export_data`, `results_export_image`, `results_exports_list`, `results_plots_list`, `results_dataset_add`, `results_plot_add`, `results_plot_image`, `results_plots_clear` |
 | Documentation | `docs_get`, `docs_list`, `physics_get_guide`, `troubleshoot`, `modeling_best_practices`, `pdf_search`, `pdf_search_status`, `pdf_list_modules` |
 
 ### Workflow scripts (not MCP tools yet)
@@ -100,6 +100,102 @@ call them yet.
 | `workflows/convert_2D_to_3D.py` | Converts a 2D axisymmetric recipe to a 3D model |
 | `workflows/Comsol_live_monitor.py` | Reports live model state: solver status, errors, warnings, physics, materials, and mesh quality |
 | `analytic_properties/apply_analytic_properties.py` | Applies the analytic gas property expressions |
+
+## Transient Studies
+
+Use a Transient (time-dependent) study when a steady solve does not
+converge. It shows whether the flow settles to one state or keeps moving.
+Three tools hold the recipe:
+
+1. `study_transient_from_solution` creates a Transient study that starts
+   from the last state of a solved study. It sets the output times
+   (`tlist`), the relative tolerance (`rtol`), and the physics to solve. The
+   initial values, and the values of the physics that it does not solve,
+   come from the solved study.
+2. `results_probe_time_series` reads expressions at a list of points for
+   every output time.
+3. `study_use_solution` makes another study, for example a heat study, read
+   the last state of the Transient study.
+
+```python
+call("study_transient_from_solution", study_tag="std3", from_study="std1",
+     tlist="range(0,1e-3,0.06)", rtol="1e-3",
+     solve_for={"/physics/ht": False, "/multiphysics/noni1": False})
+call("study_solve", study_name="Study 3")  # MPh solves by label. The setup result gives it.
+call("results_probe_time_series", points=[[0.02, 0.001, 0.0125]], expressions="u",
+     study_tag="std3", names=["channel_mid"])
+call("study_use_solution", study_tag="std2", from_study="std3")
+call("study_solve", study_name="Study 2")
+```
+
+`examples/transient_from_steady.py` runs these steps on a saved model and
+writes the probes to a CSV file.
+
+### Solver options
+
+The defaults of `study_transient_from_solution` come from one model on
+COMSOL 6.4. That model is a laminar flow unit cell of a plate-fin heat sink,
+with 193 000 degrees of freedom (DOFs). They are options, not fixed settings. Pass
+`None` to keep the COMSOL default.
+
+| Option | Default | Why |
+|--------|---------|-----|
+| `consistent` | `"off"` | With the consistent start step on, Newton did not converge at t = 1e-7 s, with both the direct and the iterative linear solver. With it off, the runs started. |
+| `linear_solver` | `"direct"` | In steady runs of the same cell, the direct solver took 2 s per iteration on 32 cores, against 14 s for the iterative solver. It needs more memory. If it runs out of memory, use `"iterative"`. |
+| `jacobian_update` | `"onevery"` | A new Jacobian at each Newton step. The runs that worked used it. Its effect alone was not tested. |
+
+On the Rice NOTS cluster, with these settings, a 5 ms run took 4.5 minutes
+(31 time steps). A 60 ms run took 36 minutes (69 time steps). On a
+laptop, the same settings, from a different start state, ran 2 hours
+without reaching 1 ms of flow time. The cause of that difference was not
+found.
+
+### Probes
+
+MPh cannot evaluate on a Cut Point 3D dataset. It reports that the dataset
+"does not refer to a solution". `results_probe_time_series` evaluates
+`at3(x,y,z,expr)` (`at2` in 2D) on the solution dataset instead. Each term
+is a global expression, so MPh returns one row per output time and one
+column per term.
+
+### Reuse the last state
+
+The step settings of a study reach its solver sequence only when COMSOL
+creates the sequence. An existing sequence keeps its own copy in its
+Variables feature (`v1`). So `study_use_solution` sets the step and also
+sets `notsol` of `v1` to the solution of the other study, with
+`notsolnum` = `last`.
+
+### Checks
+
+1. The mock tests in `tests/test_transient_tools.py` cover the three tools.
+   Their solver tree copies the tree that COMSOL 6.4 builds.
+2. On 2026-11-03, the three tools and the example ran on COMSOL 6.4 on an
+   arm64 Mac. The model was a small 3D channel with laminar flow and heat
+   transfer.
+   A 1 ms Transient flow run (11 output times) took about 70 s. COMSOL
+   accepted every step and `v1` setting, and the heat study solved on the
+   last Transient state.
+3. A 5 ms run of the same channel on a finer mesh did not finish in
+   18 minutes, so the check stopped it. The cause of the slow run was not
+   found.
+
+### Limits
+
+1. The time step limits what a run can show. In the 60 ms run, every step
+   from about 13 ms was 0.96 ms long. A step of that length cannot resolve
+   vortex shedding near 1 kHz. Such shedding has a period near 1 ms.
+2. The BDF time solver (backward differentiation formula) damps changes
+   that are faster than its step. A run that looks steady can still hide
+   fast shedding. To look for it, set a maximum step well below the
+   shedding period with `study_configure_solver`, for example
+   `{"Time": {"maxstepconstraintbdf": "const", "maxstepbdf": "1e-4"}}`.
+   This setting was not tested on the heat sink cell.
+3. Symmetry planes allow only symmetric motion. A model with symmetry
+   planes cannot show shedding that breaks that symmetry.
+4. Run `study_transient_from_solution` on a study with no solver sequence.
+   COMSOL may not copy new step settings into an existing sequence. The
+   tool returns a warning in that case.
 
 ## Installation
 
