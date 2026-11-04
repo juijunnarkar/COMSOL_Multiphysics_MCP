@@ -371,7 +371,8 @@ class FakeCoupling:
 
 
 class FakeStudyStep:
-    KNOWN = {"useparam", "pname", "plistarr", "punit"}
+    KNOWN = {"useparam", "pname", "plistarr", "punit", "tlist", "usertol", "rtol",
+             "useinitsol", "initmethod", "initstudy", "solnum", "usesol", "notsolmethod", "notstudy", "notsolnum"}
 
     def __init__(self):
         self.solve_for = {}
@@ -387,16 +388,20 @@ class FakeStudyStep:
 
 
 class FakeStudy:
-    def __init__(self):
+    def __init__(self, label="Study"):
         self.steps = {}
         self.step_nodes = {}
+        self._label = label
+
+    def label(self):
+        return self._label
 
     def create(self, tag, stype):
         self.steps[tag] = stype
         self.step_nodes[tag] = FakeStudyStep()
 
-    def feature(self, tag):
-        return self.step_nodes[tag]
+    def feature(self, tag=None):
+        return FakeTagList(self.step_nodes) if tag is None else self.step_nodes[tag]
 
 
 class FakeSizeNode:
@@ -503,8 +508,22 @@ class FakeSolution:
         self.attached = tag
 
     def createAutoSequence(self, study_tag):
-        self.children = {"t1": FakeSolverFeature("Time", {"fc1": FakeSolverFeature("FullyCoupled", known={"maxiter"})},
-                                                 known={"maxstepbdf"})}
+        # The default sequence of a Transient laminar flow study, as COMSOL 6.4 builds it (2026-11-03).
+        # A dDef node of type Direct comes first, and the multigrid coarse solver i1/mg1/cs/d1 comes
+        # before the top-level d1.
+        variables = {"initmethod", "initsol", "solnum", "notsolmethod", "notsol", "notsolnum"}
+        coarse = FakeSolverFeature("CoarseSolver", {"dDef": FakeSolverFeature("Direct"), "d1": FakeSolverFeature("Direct")})
+        self.children = {
+            "st1": FakeSolverFeature("StudyStep"),
+            "v1": FakeSolverFeature("Variables", known=variables),
+            "t1": FakeSolverFeature("Time", {
+                "dDef": FakeSolverFeature("Direct"),
+                "aDef": FakeSolverFeature("Advanced"),
+                "fc1": FakeSolverFeature("FullyCoupled", known={"maxiter", "linsolver", "jtech"}),
+                "i1": FakeSolverFeature("Iterative", {"mg1": FakeSolverFeature("Multigrid", {"cs": coarse})}),
+                "d1": FakeSolverFeature("Direct"),
+            }, known={"maxstepbdf", "consistent"}),
+        }
 
     def feature(self, tag=None):
         return FakeTagList(self.children) if tag is None else self.children[tag]
@@ -573,6 +592,24 @@ class FakePlotNode:
         self.ran += 1
 
 
+class FakeSolutionDataset:
+    """A Solution dataset: it shows one solution and has a label."""
+
+    def __init__(self, label, sol_tag):
+        self._label = label
+        self.sol_tag = sol_tag
+
+    def getType(self):
+        return "Solution"
+
+    def getString(self, name):
+        assert name == "solution"
+        return self.sol_tag
+
+    def label(self):
+        return self._label
+
+
 class FakeResult:
     def __init__(self):
         self.created: list[FakeNumerical] = []
@@ -610,8 +647,13 @@ class FakeResult:
     def remove(self, tag):
         self._groups.remove(tag)
 
-    def dataset(self):
-        return self._datasets
+    def dataset(self, tag=None):
+        return self._datasets if tag is None else self.datasets[tag]
+
+    def add_solution_dataset(self, tag, label, sol_tag):
+        """Add a Solution dataset, as COMSOL does after a solve."""
+        self.datasets[tag] = FakeSolutionDataset(label, sol_tag)
+        self._datasets._tags.append(tag)
 
     def export(self):
         return self._exports
@@ -639,7 +681,7 @@ class FakeJavaModel:
         return self._result
 
     def _create_study(self, tag):
-        self.studies[tag] = FakeStudy()
+        self.studies[tag] = FakeStudy(f"Study {len(self.studies) + 1}")
         return self.studies[tag]
 
     def study(self, tag=None):

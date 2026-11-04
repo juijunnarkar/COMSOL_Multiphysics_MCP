@@ -194,9 +194,137 @@ def export_plot_image(model, plot_group: str, file_path: str, width: int = 1400,
     return {"success": True, "plot_group": plot_group, "file": str(file_path)}
 
 
+def solution_dataset(model, study_tag: str) -> Optional[str]:
+    """
+    Return the MPh name of the Solution dataset that shows the solution of a study, or None.
+
+    COMSOL 6.4 labels the dataset "Study 3/Solution 3". MPh reads "/" as a path
+    separator, so its name for that dataset is "Study 3//Solution 3".
+    """
+    from .study import _study_solution
+
+    jm = model.java
+    sol_tag = _study_solution(jm, study_tag)
+    if sol_tag is None:
+        return None
+    datasets = jm.result().dataset()
+    for tag in datasets.tags():
+        node = jm.result().dataset(tag)
+        try:
+            if str(node.getType()) == "Solution" and str(node.getString("solution")) == sol_tag:
+                return str(node.label()).replace("/", "//")
+        except Exception:
+            continue
+    return None
+
+
+def probe_time_series(
+    model,
+    points: Sequence[Sequence[float]],
+    expressions: Union[str, Sequence[str]],
+    dataset: Optional[str] = None,
+    study_tag: Optional[str] = None,
+    names: Optional[Sequence[str]] = None,
+    unit: Optional[str] = None,
+) -> dict:
+    """
+    Evaluate expressions at points against time.
+
+    MPh cannot evaluate on a CutPoint3D dataset: it reports that the dataset does
+    not refer to a solution. This function evaluates at3(x, y, z, expr) (at2 in 2D)
+    on the solution dataset itself. Each at3 term is a global expression, so MPh
+    returns one row per output time and one column per expression.
+    """
+    import numpy as np
+
+    expressions = [expressions] if isinstance(expressions, str) else list(expressions)
+    points = [[float(c) for c in p] for p in points]
+    if not points or not expressions:
+        return {"success": False, "error": "Give at least one point and one expression."}
+    dims = {len(p) for p in points}
+    sdim = _space_dimension(model)
+    if dims != {sdim}:
+        return {"success": False, "error": f"Each point needs {sdim} coordinates, for a {sdim}D model."}
+    names = list(names) if names is not None else [f"p{i + 1}" for i in range(len(points))]
+    if len(names) != len(points):
+        return {"success": False, "error": "Give one name per point."}
+    if dataset is None and study_tag is not None:
+        dataset = solution_dataset(model, study_tag)
+        if dataset is None:
+            return {"success": False, "error": f"No Solution dataset shows the solution of {study_tag}."}
+
+    operator = f"at{sdim}"
+    terms = [f"{operator}({','.join(f'{c:.9g}' for c in p)},{e})" for p in points for e in expressions]
+
+    def run(columns):
+        units = None if unit is None else (["s"] if columns[0] == "t" else []) + [unit] * len(terms)
+        raw = model.evaluate(columns, unit=units, dataset=dataset)
+        return np.asarray(raw, dtype=float).reshape(-1, len(columns))
+
+    columns = ["t"] + terms
+    try:
+        try:
+            table = run(columns)
+        except Exception as e:
+            # A Stationary solution has no time variable t (COMSOL 6.4: "Undefined variable. - Variable: t").
+            if "Variable: t" not in " ".join(str(e).split()):
+                raise
+            columns = terms
+            table = run(columns)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to evaluate the probes: {' '.join(str(e).split())[:400]}",
+                "expressions": columns}
+    first = 1 if columns[0] == "t" else 0
+    probes = []
+    for i, (name, point) in enumerate(zip(names, points)):
+        start = first + i * len(expressions)
+        probes.append({"name": name, "point": point,
+                       "values": {e: table[:, start + j].tolist() for j, e in enumerate(expressions)}})
+    return {"success": True, "dataset": dataset, "unit": unit, "n_times": int(table.shape[0]),
+            "times": table[:, 0].tolist() if first else None, "probes": probes}
+
+
 def register_results_tools(mcp: FastMCP) -> None:
     """Register results tools with the MCP server."""
-    
+
+    @mcp.tool()
+    def results_probe_time_series(
+        points: Sequence[Sequence[float]],
+        expressions: Union[str, Sequence[str]],
+        dataset: Optional[str] = None,
+        study_tag: Optional[str] = None,
+        names: Optional[Sequence[str]] = None,
+        unit: Optional[str] = None,
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Read expressions at points for every output time of a solution.
+
+        Use it to watch a Transient study: if every probe settles, the flow is
+        steady. The tool evaluates at3(x,y,z,expr) (at2 in 2D) on the solution
+        dataset. A CutPoint3D dataset does not work through MPh.
+
+        Example: results_probe_time_series([[0.02, 0.001, 0.0125]], ["u", "p"],
+        study_tag="std3", names=["channel_mid"]).
+
+        Args:
+            points: Point coordinates in model length units, one list per point
+            expressions: Expression(s) to read at each point, e.g. "u" or ["u", "T"]
+            dataset: Solution dataset label, e.g. "Study 3//Solution 3"
+            study_tag: Study tag. The tool finds its Solution dataset. Used when dataset is None.
+            names: One name per point (default: p1, p2, ...)
+            unit: Unit for every expression, e.g. "m/s" (default: model units)
+            model_name: Model name (default: current model)
+
+        Returns:
+            The output times (None for a Stationary solution), and for each probe
+            its point and one value list per expression
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        return probe_time_series(model, points, expressions, dataset, study_tag, names, unit)
+
     @mcp.tool()
     def results_evaluate(
         expression: Union[str, Sequence[str]],

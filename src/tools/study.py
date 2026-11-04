@@ -108,6 +108,35 @@ def _solver_tree(node) -> dict:
             for tag in node.feature().tags()}
 
 
+def _study_solution(jm, study_tag: str) -> Optional[str]:
+    """Return the tag of the last solution that belongs to a study, or None."""
+    sol_tag = None
+    for tag in jm.sol().tags():
+        if str(jm.sol(tag).study()) == study_tag:
+            sol_tag = str(tag)
+    return sol_tag
+
+
+def _study_label(jm, study_tag: str) -> Optional[str]:
+    """Return the label of a study, for example "Study 3". MPh solves a study by its label."""
+    try:
+        return str(jm.study(study_tag).label())
+    except Exception:
+        return None
+
+
+def _find_feature(node, key):
+    """Return the first feature under node, depth first, whose tag or type is key."""
+    for tag in node.feature().tags():
+        child = node.feature(tag)
+        if key in (str(tag), str(child.getType())):
+            return child
+        found = _find_feature(child, key)
+        if found is not None:
+            return found
+    return None
+
+
 def configure_solver(model, study_tag: str, settings: dict) -> dict:
     """
     Create the default solver sequence of a study if it has none, then set solver properties.
@@ -119,11 +148,9 @@ def configure_solver(model, study_tag: str, settings: dict) -> dict:
     jm = model.java
     if study_tag not in [str(t) for t in jm.study().tags()]:
         return {"success": False, "error": f"Study not found: {study_tag}"}
-    sol_tag = None
-    for tag in jm.sol().tags():
-        if str(jm.sol(tag).study()) == study_tag:
-            sol_tag = str(tag)
-    if sol_tag is None:
+    sol_tag = _study_solution(jm, study_tag)
+    created = sol_tag is None
+    if created:
         existing = [str(t) for t in jm.sol().tags()]
         i = 1
         while f"sol{i}" in existing:
@@ -135,19 +162,9 @@ def configure_solver(model, study_tag: str, settings: dict) -> dict:
         sol.createAutoSequence(study_tag)
     sol = jm.sol(sol_tag)
 
-    def find(node, key):
-        for tag in node.feature().tags():
-            child = node.feature(tag)
-            if key in (str(tag), str(child.getType())):
-                return child
-            found = find(child, key)
-            if found is not None:
-                return found
-        return None
-
     rejected = {}
     for key, properties in settings.items():
-        node = find(sol, key)
+        node = _find_feature(sol, key)
         if node is None:
             rejected[key] = "feature not found"
             continue
@@ -156,11 +173,158 @@ def configure_solver(model, study_tag: str, settings: dict) -> dict:
                 node.set(name, str(value))
             except Exception as e:
                 rejected[f"{key}.{name}"] = str(e).strip().splitlines()[0]
-    result = {"success": not rejected, "study": study_tag, "solution": sol_tag}
+    result = {"success": not rejected, "study": study_tag, "solution": sol_tag, "sequence_created": created}
     if rejected:
         result["rejected"] = rejected
         result["error"] = f"COMSOL rejected {sorted(rejected)}."
     result.update({"settings": dict(settings), "features": _solver_tree(sol)})
+    return result
+
+
+def link_solution(
+    model,
+    study_tag: str,
+    from_study: str,
+    step_tag: Optional[str] = None,
+    initial: bool = False,
+    not_solved: bool = True,
+    solnum: str = "last",
+) -> dict:
+    """
+    Make a study read the solution of another, solved study.
+
+    initial=True takes the initial values from that solution. not_solved=True takes
+    the values of the variables that the step does not solve for from it. solnum
+    picks the stored state, for example "last" for the last output time.
+
+    The step settings reach a solver sequence only when COMSOL creates it. An
+    existing sequence keeps its own copy in its Variables feature (v1), so this
+    function sets v1 too.
+    """
+    jm = model.java
+    studies = [str(t) for t in jm.study().tags()]
+    for tag in (study_tag, from_study):
+        if tag not in studies:
+            return {"success": False, "error": f"Study not found: {tag}"}
+    if not (initial or not_solved):
+        return {"success": False, "error": "Set initial, not_solved, or both to True."}
+    source = _study_solution(jm, from_study)
+    if source is None or bool(jm.sol(source).isEmpty()):
+        return {"success": False, "error": f"Study {from_study} has no computed solution. Solve it first."}
+    if step_tag is None:
+        step_tag = str(jm.study(study_tag).feature().tags()[0])
+
+    step_properties, v1 = {}, {}
+    if initial:
+        step_properties.update({"useinitsol": "on", "initmethod": "sol", "initstudy": from_study, "solnum": solnum})
+        v1.update({"initmethod": "sol", "initsol": source, "solnum": solnum})
+    if not_solved:
+        step_properties.update({"usesol": "on", "notsolmethod": "sol", "notstudy": from_study, "notsolnum": solnum})
+        v1.update({"notsolmethod": "sol", "notsol": source, "notsolnum": solnum})
+    # Set the step first, so that a sequence created next starts from these settings.
+    step = configure_step(model, study_tag, step_tag, properties=step_properties)
+    solver = configure_solver(model, study_tag, {"v1": v1})
+    rejected = {**step.get("rejected", {}), **solver.get("rejected", {})}
+    result = {"success": not rejected, "study": study_tag, "label": _study_label(jm, study_tag),
+              "step": step_tag, "from_study": from_study,
+              "from_solution": source, "solution": solver.get("solution"), "step_properties": step_properties,
+              "variables": v1}
+    if rejected:
+        result["rejected"] = rejected
+        result["error"] = f"COMSOL rejected {sorted(rejected)}."
+    return result
+
+
+LINEAR_SOLVERS = {"direct": "Direct", "iterative": "Iterative"}
+
+
+def _linear_solver_tag(tree: dict, kind: str) -> Optional[str]:
+    """
+    Return the tag of a linear solver of a type in a solver tree from _solver_tree.
+
+    The default sequence also holds a dDef node of type Direct, and a coarse grid
+    solver d1 inside the iterative solver (i1/mg1/cs/d1, COMSOL 6.4). Prefer the
+    shallowest node, and a tag that does not end in "Def", such as t1/d1.
+    """
+    found = []
+
+    def walk(node, depth):
+        for tag, child in node.items():
+            if isinstance(child, dict):
+                if child.get("type") == kind:
+                    found.append((depth, tag.endswith("Def"), tag))
+                walk(child, depth + 1)
+    walk(tree, 0)
+    return min(found)[2] if found else None
+
+
+def configure_transient(
+    model,
+    study_tag: str,
+    from_study: str,
+    tlist: str,
+    rtol: Optional[str] = None,
+    solve_for: Optional[dict] = None,
+    step_tag: str = "time",
+    solnum: str = "last",
+    consistent: Optional[str] = "off",
+    linear_solver: Optional[str] = "direct",
+    jacobian_update: Optional[str] = "onevery",
+) -> dict:
+    """
+    Set up a Transient study that starts from the solution of a solved study.
+
+    It creates the study if it does not exist. Then it sets the output times,
+    the tolerance, and the physics to solve. It takes the initial values and the
+    values of the variables it does not solve for from from_study. Last, it
+    creates the solver sequence and sets the time solver options. A value of
+    None for consistent, linear_solver, or jacobian_update keeps the COMSOL default.
+    """
+    jm = model.java
+    created = study_tag not in [str(t) for t in jm.study().tags()]
+    existing_sequence = not created and _study_solution(jm, study_tag) is not None
+    if created:
+        made = create_study(model, "Transient", study_tag)
+        if not made["success"]:
+            return made
+    properties = {"tlist": tlist}
+    if rtol is not None:
+        properties.update({"usertol": "on", "rtol": str(rtol)})
+    step = configure_step(model, study_tag, step_tag, solve_for, properties)
+    if not step["success"]:
+        return step
+    link = link_solution(model, study_tag, from_study, step_tag, initial=True, not_solved=True, solnum=solnum)
+    if not link["success"]:
+        return link
+
+    tree = configure_solver(model, study_tag, {})["features"]
+    settings = {}
+    if consistent is not None:
+        settings["Time"] = {"consistent": consistent}
+    coupled = {}
+    if linear_solver is not None:
+        kind = LINEAR_SOLVERS.get(linear_solver)
+        tag = _linear_solver_tag(tree, kind) if kind else linear_solver
+        if tag is None:
+            return {"success": False, "error": f"The solver sequence of {study_tag} has no {kind} linear solver.",
+                    "features": tree}
+        coupled["linsolver"] = tag
+    if jacobian_update is not None:
+        coupled["jtech"] = jacobian_update
+    if coupled:
+        settings["FullyCoupled"] = coupled
+    solver = configure_solver(model, study_tag, settings)
+    result = {"success": solver["success"], "study": study_tag, "label": _study_label(jm, study_tag),
+              "step": step_tag, "created": created,
+              "from_study": from_study, "from_solution": link["from_solution"], "solution": solver["solution"],
+              "step_properties": {**properties, **link["step_properties"]}, "solve_for": dict(solve_for or {}),
+              "solver_settings": settings, "features": solver["features"]}
+    if not solver["success"]:
+        result["rejected"] = solver["rejected"]
+        result["error"] = solver["error"]
+    if existing_sequence:
+        result["warning"] = ("The study already had a solver sequence. COMSOL may not copy the new tlist and "
+                             "rtol of the step into it. Check the Time feature, or remove the solution and run again.")
     return result
 
 
@@ -285,6 +449,106 @@ def register_study_tools(mcp: FastMCP) -> None:
         if model is None:
             return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
         return configure_step(model, study_tag, step_tag, solve_for, properties)
+
+    @mcp.tool()
+    def study_transient_from_solution(
+        study_tag: str,
+        from_study: str,
+        tlist: str,
+        rtol: Optional[str] = None,
+        solve_for: Optional[dict] = None,
+        solnum: str = "last",
+        consistent: Optional[str] = "off",
+        linear_solver: Optional[str] = "direct",
+        jacobian_update: Optional[str] = "onevery",
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Set up a Transient study that starts from the last state of a solved study.
+
+        Use it when a steady solve does not converge, to see whether the flow
+        settles or keeps moving. The tool creates the study if it does not exist.
+        It takes the initial values, and the values of the physics it does not
+        solve, from from_study. Then it creates the solver sequence. Run it on a
+        study with no solver sequence: an existing sequence may keep its old times.
+
+        The solver defaults come from a 193 000 DOF laminar flow cell (COMSOL 6.4):
+        - consistent "off": with the consistent start step on, Newton did not
+          converge at t = 1e-7 s with the direct or the iterative linear solver.
+        - linear_solver "direct": in steady runs of the same cell, the direct
+          solver took 2 s per iteration on 32 cores, against 14 s for the
+          iterative solver. It needs more memory.
+        - jacobian_update "onevery": a new Jacobian at each Newton step. The
+          working runs used it. Its effect alone was not tested.
+        Pass None to keep the COMSOL default for an option.
+
+        Limits: the BDF time solver damps changes faster than its step. A run
+        with 1 ms steps cannot resolve 1 kHz vortex shedding. Symmetry planes
+        allow only symmetric motion.
+
+        Args:
+            study_tag: Tag of the Transient study, e.g. "std3" (created if missing)
+            from_study: Tag of the solved study to start from, e.g. "std1"
+            tlist: Output times, e.g. "range(0,1e-3,0.06)". The solver picks its own steps.
+            rtol: Relative tolerance, e.g. "1e-3" (default: COMSOL default)
+            solve_for: Physics or multiphysics paths mapped to True or False,
+                e.g. {"/physics/ht": False, "/multiphysics/noni1": False} for flow only
+            solnum: Stored state of from_study to use (default: "last")
+            consistent: Consistent initialization of the time solver, e.g. "off".
+                None keeps the COMSOL default.
+            linear_solver: "direct", "iterative", a linear solver tag such as "d1",
+                or None to keep the COMSOL default
+            jacobian_update: Jacobian update of the fully coupled solver, e.g.
+                "onevery" or "minimal". None keeps the COMSOL default.
+            model_name: Model name (default: current model)
+
+        Returns:
+            The step properties, the solver settings, the solver feature tree,
+            and anything COMSOL rejected
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        return configure_transient(model, study_tag, from_study, tlist, rtol, solve_for, "time", solnum,
+                                   consistent, linear_solver, jacobian_update)
+
+    @mcp.tool()
+    def study_use_solution(
+        study_tag: str,
+        from_study: str,
+        step_tag: Optional[str] = None,
+        initial: bool = False,
+        not_solved: bool = True,
+        solnum: str = "last",
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Make a study read the solution of another, solved study.
+
+        Example: solve heat (std2) on the last flow state of a Transient flow
+        study (std3) with study_use_solution("std2", "std3"). The values of the
+        physics that std2 does not solve come from the last time of std3.
+
+        The tool sets the study step and the Variables feature (v1) of the solver
+        sequence. An existing sequence keeps its own copy of the step settings,
+        so the step alone is not enough.
+
+        Args:
+            study_tag: Study that reads the solution, e.g. "std2"
+            from_study: Solved study to read, e.g. "std3"
+            step_tag: Step of study_tag (default: its first step)
+            initial: Take the initial values from from_study
+            not_solved: Take the values of the variables that the step does not solve for
+            solnum: Stored state to use (default: "last")
+            model_name: Model name (default: current model)
+
+        Returns:
+            The step properties, the v1 settings, and anything COMSOL rejected
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        return link_solution(model, study_tag, from_study, step_tag, initial, not_solved, solnum)
 
     @mcp.tool()
     def study_solve(
